@@ -35,10 +35,11 @@ shell, so the cookie never appears on a command line or in shell history.
 
 ## Tests
 
+The offline unit tests live in `tests/` and run with pytest; see the main
+README. The scripts here need a live account or a running Home Assistant.
+
 | script | needs network | what it covers |
 |---|---|---|
-| `test_api_unit.py` | no | agreement selection, retry classification, request construction |
-| `test_statistics_unit.py` | no | running sums, unit scaling, de-duplication, the daylight-saving fold |
 | `test_login.py` | yes | the cookie → token exchange works end to end |
 | `verify_against_csv.py` | yes | API totals vs. a CSV export from My Account |
 | `verify_in_ha.py` | no | what actually landed in Home Assistant's statistics |

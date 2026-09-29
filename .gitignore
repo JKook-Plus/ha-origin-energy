@@ -19,3 +19,4 @@ __pycache__/
 
 # Rendered previews from the brand asset generator
 brands/preview.png
+.pytest_cache/

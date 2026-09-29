@@ -84,8 +84,9 @@ Copy the part after `auth0=`, up to the `;`.
 
 Origin issues the cookie with a rolling expiry roughly **100 days** out,
 and Auth0 pushes that expiry forward every time the integration
-successfully refreshes. Since the integration polls daily, the session
-should renew itself indefinitely and you shouldn't need to repeat this.
+successfully refreshes. The integration polls every 4 hours by default
+(configurable from 1 to 24 hours), so the session should renew itself
+indefinitely and you shouldn't need to repeat this.
 
 If the session ever does lapse — you sign out everywhere, change your
 password, or Origin invalidates sessions server-side — Home Assistant

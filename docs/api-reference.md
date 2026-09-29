@@ -257,7 +257,7 @@ now do.
 
 Worth knowing because it is invisible from outside: a probe script using a
 plain `aiohttp.ClientSession(headers=…)` succeeds while the integration
-fails on the identical account and cookie. `tools/test_api_unit.py`
+fails on the identical account and cookie. `tests/test_api.py`
 asserts the browser `User-Agent` reaches the request, since the failure
 mode otherwise looks exactly like bad credentials.
 
@@ -285,9 +285,8 @@ That covers unit conversion, day-boundary handling, HOURLY→daily rollup
 and chunk-boundary de-duplication together, and it is the check worth
 re-running after any change to the query or the import path.
 
-Two offline suites cover the parts that never touch the network:
-`tools/test_api_unit.py` (agreement selection, retry classification,
-request construction) and `tools/test_statistics_unit.py` (running sums,
-unit scaling, de-duplication, the daylight-saving fold).
+The pytest suite under `tests/` covers the parts that never touch the
+network: agreement selection, retry classification, request construction,
+running sums, unit scaling, de-duplication and the daylight-saving fold.
 
 [kraken]: https://kraken.tech/

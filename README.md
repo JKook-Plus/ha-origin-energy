@@ -187,18 +187,15 @@ logger:
 ## Development
 
 ```bash
-python3 tools/test_api_unit.py         # agreement selection, retries, request shape
-python3 tools/test_statistics_unit.py  # sums, units, de-duplication, DST fold
+python3.14 -m venv .venv
+.venv/bin/pip install -r requirements_test.txt
+.venv/bin/pytest
 ```
 
-Both run offline against a faked session, but import Home Assistant, so
-run them wherever HA is installed — inside the container is easiest:
-
-```bash
-docker cp custom_components/origin_energy homeassistant:/tmp/origin_energy_test/
-docker cp tools/. homeassistant:/tmp/origin_energy_test/
-docker exec -i homeassistant python3 /tmp/origin_energy_test/test_api_unit.py
-```
+The suite runs offline against a faked session: agreement selection,
+retries, request shape, running sums, units, de-duplication and the
+daylight-saving fold. CI runs it on every push and pull request, and daily
+against the latest Home Assistant.
 
 `tools/verify_against_csv.py` reconciles the API against a CSV export
 downloaded from My Account — the end-to-end check worth running after any
