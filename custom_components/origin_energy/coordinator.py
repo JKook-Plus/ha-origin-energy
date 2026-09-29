@@ -14,7 +14,7 @@ import asyncio
 import logging
 import re
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -131,6 +131,55 @@ class OriginEnergyData:
     last_updated: datetime
 
 
+HOUR = timedelta(hours=1)
+
+# How long one data point covers, for the units that are finer than a day.
+# These are spread over the UTC hours they overlap. Coarser units are filed
+# whole under the UTC hour they start in: splitting a day's total across
+# hours would invent a consumption profile Origin never reported.
+SUB_DAILY_DURATIONS = {"HOURLY": HOUR, "HALF_HOURLY": timedelta(minutes=30)}
+
+
+def utc_hour(instant: datetime) -> datetime:
+    """The UTC clock hour containing `instant`."""
+    return dt_util.as_utc(instant).replace(minute=0, second=0, microsecond=0)
+
+
+def hour_shares(start: datetime, time_unit: str) -> list[tuple[datetime, timedelta, float]]:
+    """Split one data point across the UTC hours it covers.
+
+    Returns (hour, time covered in that hour, fraction of the point's value)
+    for each hour. Home Assistant only checks that a statistic's start is on
+    the hour *before* converting it to UTC, so Origin's 10:00+09:30 would be
+    accepted and stored at 00:30 UTC, off the hourly grid every other row
+    sits on. In South Australia and the Northern Territory every local hour
+    straddles two UTC hours, so each point is shared between them in
+    proportion to time.
+    """
+    duration = SUB_DAILY_DURATIONS.get(time_unit)
+    if duration is None:
+        return [(utc_hour(start), HOUR, 1.0)]
+
+    begin = dt_util.as_utc(start)
+    end = begin + duration
+    shares = []
+    hour = utc_hour(begin)
+    while hour < end:
+        covered = min(end, hour + HOUR) - max(begin, hour)
+        shares.append((hour, covered, covered / duration))
+        hour += HOUR
+    return shares
+
+
+@dataclass
+class _HourBucket:
+    """One UTC hour being assembled from the data points that overlap it."""
+
+    consumption: float = 0.0
+    cost: float = 0.0
+    covered: timedelta = timedelta(0)
+
+
 @dataclass
 class _ImportCursor:
     """Running totals carried across query windows.
@@ -140,12 +189,19 @@ class _ImportCursor:
     de-duplication: Origin's ranges are inclusive at both ends, so
     consecutive windows share a boundary point that must not be counted
     twice.
+
+    pending holds UTC hours that have not been written yet because a point
+    still to come may add to them. Hours before emit_from are assembled but
+    never written: an import fetches from an hour early so the first hour it
+    writes is complete, and that earlier hour is already stored.
     """
 
     consumption_sum: float = 0.0
     cost_sum: float = 0.0
     last_start: datetime | None = None
     written: int = 0
+    emit_from: datetime | None = None
+    pending: dict[datetime, _HourBucket] = field(default_factory=dict)
 
 
 class OriginEnergyCoordinator(DataUpdateCoordinator[OriginEnergyData]):
@@ -395,7 +451,9 @@ class OriginEnergyCoordinator(DataUpdateCoordinator[OriginEnergyData]):
             )
 
         anchor = min(last_point, last_reading) if last_reading else last_point
-        start = anchor - timedelta(days=OVERLAP_DAYS)
+        # On the UTC hour, so the baseline (everything before start) and the
+        # first hour written meet exactly.
+        start = utc_hour(anchor - timedelta(days=OVERLAP_DAYS))
         end = max(last_reading or now, last_point) + timedelta(minutes=1)
 
         cursor = await self._async_baseline_cursor(start)
@@ -405,8 +463,8 @@ class OriginEnergyCoordinator(DataUpdateCoordinator[OriginEnergyData]):
             # back to appending only what is genuinely new.
             _LOGGER.debug("No baseline before %s, appending new points only", start)
             consumption_sum, cost_sum = await self._async_sums_at(last_point)
-            cursor = _ImportCursor(consumption_sum, cost_sum, last_point)
-            start = last_point
+            start = last_point + HOUR
+            cursor = _ImportCursor(consumption_sum, cost_sum, emit_from=start)
 
         cursor = await self._async_import(start, end, cursor)
         if not cursor.written:
@@ -497,10 +555,17 @@ class OriginEnergyCoordinator(DataUpdateCoordinator[OriginEnergyData]):
         so long ranges are split. Writing each window as it arrives keeps
         memory flat over a multi-year backfill and lets the Energy dashboard
         fill in progressively.
+
+        The first hour written is the UTC hour containing `start`. Fetching
+        starts an hour before that: in a half-hour timezone the point that
+        began half an hour earlier supplies the first half of that hour.
         """
         consumption_metadata, cost_metadata = self._statistic_metadata()
         window = timedelta(days=chunk_days(self.time_unit))
-        window_start = start
+        start = utc_hour(start)
+        if cursor.emit_from is None:
+            cursor.emit_from = start
+        window_start = start - HOUR
 
         while window_start < end:
             window_end = min(window_start + window, end)
@@ -510,7 +575,9 @@ class OriginEnergyCoordinator(DataUpdateCoordinator[OriginEnergyData]):
                 self.agreement_id, window_start, window_end, self.time_unit
             )
 
-            consumption_stats, cost_stats = self._build_statistics(result, cursor)
+            consumption_stats, cost_stats = build_statistics(
+                result, cursor, self.time_unit
+            )
             if consumption_stats:
                 async_add_external_statistics(
                     self.hass, consumption_metadata, consumption_stats
@@ -522,68 +589,84 @@ class OriginEnergyCoordinator(DataUpdateCoordinator[OriginEnergyData]):
 
         return cursor
 
-    def _build_statistics(
-        self, result: UsageWindow, cursor: _ImportCursor
-    ) -> tuple[list[StatisticData], list[StatisticData]]:
-        """Turn one window's data points into statistics rows.
 
-        Advances the cursor's running sums, which is why points must arrive
-        in chronological order.
-        """
-        energy_scale = _scale(ENERGY_TO_KWH, result.consumption_unit, "WATT_HOUR", "energy")
-        cost_scale = _scale(COST_TO_DOLLARS, result.cost_unit, "CENT", "cost")
+def build_statistics(
+    result: UsageWindow, cursor: _ImportCursor, time_unit: str
+) -> tuple[list[StatisticData], list[StatisticData]]:
+    """Turn one window's data points into statistics rows on UTC hours.
 
-        consumption_stats: list[StatisticData] = []
-        cost_stats: list[StatisticData] = []
+    Advances the cursor's running sums, which is why points must arrive in
+    chronological order. An hour is written once it is complete: either
+    fully covered, or a later point has started after it ends (so a missing
+    point stays missing rather than blocking everything after it). The last
+    partly covered hour stays in the cursor for the next window, or for the
+    next import, which re-fetches it.
+    """
+    energy_scale = _scale(ENERGY_TO_KWH, result.consumption_unit, "WATT_HOUR", "energy")
+    cost_scale = _scale(COST_TO_DOLLARS, result.cost_unit, "CENT", "cost")
 
-        usable: list[tuple[datetime, dict]] = []
-        for point in result.points:
-            if point.get("totalConsumedEnergy") is None:
-                # A MISSING bucket: either past lastReadingDate or a real
-                # gap in the meter data. Both are padded out as full
-                # buckets of nulls rather than being omitted.
+    consumption_stats: list[StatisticData] = []
+    cost_stats: list[StatisticData] = []
+
+    usable: list[tuple[datetime, dict]] = []
+    for point in result.points:
+        if point.get("totalConsumedEnergy") is None:
+            # A MISSING bucket: either past lastReadingDate or a real
+            # gap in the meter data. Both are padded out as full
+            # buckets of nulls rather than being omitted.
+            continue
+        start = dt_util.parse_datetime(point["startDate"])
+        if start is None:
+            continue
+        usable.append((start, point))
+
+    # The gateway is asked for START_DATE_ASC and honours it, but the
+    # running sums below are only correct in chronological order, and
+    # ISO strings stop sorting chronologically at the end of daylight
+    # saving: 02:00+11:00 and the 02:00+10:00 an hour later compare the
+    # wrong way round as text. Sorting the parsed instants costs
+    # nothing and removes the dependency entirely.
+    usable.sort(key=lambda item: item[0])
+
+    def emit_ready(now: datetime | None) -> None:
+        """Write out, in order, every leading hour that nothing can add to."""
+        while cursor.pending:
+            hour = min(cursor.pending)
+            bucket = cursor.pending[hour]
+            finished = bucket.covered >= HOUR or (now is not None and hour + HOUR <= now)
+            if not finished:
+                return
+            del cursor.pending[hour]
+            if cursor.emit_from is not None and hour < cursor.emit_from:
                 continue
-
-            # Use Origin's own startDate as-is: HOURLY points arrive snapped
-            # to the clock hour with the correct local offset (including the
-            # half-hour offsets used by SA/NT), which is exactly the
-            # alignment HA's statistics table wants.
-            start = dt_util.parse_datetime(point["startDate"])
-            if start is None:
-                continue
-            usable.append((start, point))
-
-        # The gateway is asked for START_DATE_ASC and honours it, but the
-        # running sums below are only correct in chronological order, and
-        # ISO strings stop sorting chronologically at the end of daylight
-        # saving: 02:00+11:00 and the 02:00+10:00 an hour later compare the
-        # wrong way round as text. Sorting the parsed instants costs
-        # nothing and removes the dependency entirely.
-        usable.sort(key=lambda item: item[0])
-
-        for start, point in usable:
-            # Skips both the boundary point shared with the previous window
-            # and anything already imported.
-            if cursor.last_start is not None and start <= cursor.last_start:
-                continue
-
-            consumption_kwh = point["totalConsumedEnergy"] * energy_scale
-            cost_dollars = (point.get("totalCost") or 0) * cost_scale
-
-            cursor.consumption_sum += consumption_kwh
-            cursor.cost_sum += cost_dollars
-            cursor.last_start = start
-
+            cursor.consumption_sum += bucket.consumption
+            cursor.cost_sum += bucket.cost
             consumption_stats.append(
-                StatisticData(
-                    start=start, state=consumption_kwh, sum=cursor.consumption_sum
-                )
+                StatisticData(start=hour, state=bucket.consumption, sum=cursor.consumption_sum)
             )
             cost_stats.append(
-                StatisticData(start=start, state=cost_dollars, sum=cursor.cost_sum)
+                StatisticData(start=hour, state=bucket.cost, sum=cursor.cost_sum)
             )
 
-        return consumption_stats, cost_stats
+    for start, point in usable:
+        # Skips both the boundary point shared with the previous window
+        # and anything already imported.
+        if cursor.last_start is not None and start <= cursor.last_start:
+            continue
+        cursor.last_start = start
+
+        consumption_kwh = point["totalConsumedEnergy"] * energy_scale
+        cost_dollars = (point.get("totalCost") or 0) * cost_scale
+
+        emit_ready(dt_util.as_utc(start))
+        for hour, covered, fraction in hour_shares(start, time_unit):
+            bucket = cursor.pending.setdefault(hour, _HourBucket())
+            bucket.consumption += consumption_kwh * fraction
+            bucket.cost += cost_dollars * fraction
+            bucket.covered += covered
+        emit_ready(None)
+
+    return consumption_stats, cost_stats
 
 
 def _scale(table: dict[str, float], unit: str | None, default: str, label: str) -> float:

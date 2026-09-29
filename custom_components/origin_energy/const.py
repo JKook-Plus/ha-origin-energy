@@ -60,8 +60,10 @@ CONF_BACKFILL_COMPLETE = "backfill_complete"
 
 # Origin's UsageTimeUnit enum is BILLING, MONTHLY, DAILY, HOURLY,
 # HALF_HOURLY. HOURLY is the sweet spot: HA's external statistics are hourly
-# buckets, and Origin returns HOURLY points already snapped to the clock hour
-# so they drop straight in. HALF_HOURLY anchors its windows to the requested
+# buckets, and Origin returns HOURLY points snapped to the local clock hour.
+# That is also a UTC hour except in SA and the NT (UTC+9:30/+10:30), where
+# the coordinator shares each point between the two UTC hours it straddles
+# (see coordinator.hour_shares). HALF_HOURLY anchors its windows to the requested
 # start time rather than the clock (a query starting 20:22 yields 20:22-20:51
 # buckets), so it would need re-bucketing to gain nothing HA can store.
 #

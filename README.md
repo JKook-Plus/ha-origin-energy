@@ -175,6 +175,21 @@ after setup; give it a minute, then check
 **Developer tools → Statistics** for `origin_energy:`. The dashboard only
 lists statistics that already exist.
 
+**South Australia or the Northern Territory, upgrading from 0.2.x or
+earlier.** Those versions stored each hour at half past the UTC hour
+(10:00 in Adelaide is 00:30 UTC). Newer versions store on the UTC hour, so
+without a clean-up the old and new rows overlap and the Energy dashboard
+double counts. After upgrading, once:
+
+1. Remove the Origin Energy integration (**Settings → Devices & services**).
+2. In **Developer tools → Statistics**, search for `origin_energy:`, select
+   every result, and choose **Delete selected**.
+3. Add the integration again. It re-imports your history (up to two years)
+   in the background.
+4. Re-select the consumption statistic in the Energy dashboard settings.
+
+Other states are unaffected and need do nothing.
+
 **Numbers stop updating.** Check the `sensor.origin_energy_last_update`
 timestamp. Enable debug logging to see what the poll is doing:
 

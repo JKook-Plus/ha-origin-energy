@@ -345,8 +345,9 @@ class OriginEnergyApiClient:
     ) -> UsageWindow:
         """Return usage data points and metadata for one service agreement.
 
-        HOURLY points come back snapped to the clock hour, which is the
-        alignment HA's statistics table requires. See PREFERRED_TIME_UNITS.
+        HOURLY points come back snapped to the local clock hour, which is
+        not a UTC hour in half-hour timezones; the coordinator re-buckets
+        them. See PREFERRED_TIME_UNITS.
         """
         data = await self._graphql(
             ACCOUNT_USAGE_QUERY,

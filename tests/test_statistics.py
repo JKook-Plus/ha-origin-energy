@@ -15,8 +15,8 @@ from homeassistant.util import dt as dt_util
 
 from custom_components.origin_energy.api import UsageWindow
 from custom_components.origin_energy.coordinator import (
-    OriginEnergyCoordinator,
     _ImportCursor,
+    build_statistics,
     statistic_slug,
 )
 
@@ -42,9 +42,8 @@ def window(points, consumption_unit="WATT_HOUR", cost_unit="CENT"):
     )
 
 
-def build(result, cursor):
-    # Unbound: the method reads nothing off self.
-    return OriginEnergyCoordinator._build_statistics(None, result, cursor)
+def build(result, cursor, time_unit="HOURLY"):
+    return build_statistics(result, cursor, time_unit)
 
 
 # ---------------------------------------------------------------- running sums
@@ -229,7 +228,7 @@ def test_slugged_ids_are_valid_statistic_ids(raw):
     assert valid_statistic_id(f"origin_energy:{statistic_slug(raw)}_energy_consumption")
 
 
-# ------------------------------------------------------ local offsets preserved
+# ------------------------------------------------- stored on UTC clock hours
 
 @pytest.fixture
 def late_evening():
@@ -237,8 +236,8 @@ def late_evening():
     return consumption
 
 
-def test_keeps_origins_offset(late_evening):
-    assert late_evening[0]["start"].utcoffset().total_seconds() == 36000.0
+def test_stored_in_utc(late_evening):
+    assert late_evening[0]["start"].utcoffset().total_seconds() == 0.0
 
 
 def test_stays_on_the_clock_hour(late_evening):
